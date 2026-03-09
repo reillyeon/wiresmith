@@ -1,7 +1,9 @@
 use std::{fmt, net::IpAddr};
 
+use anyhow::{anyhow, Result};
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
+use tokio::process::Command;
 use wireguard_keys::Pubkey;
 
 #[derive(Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -23,6 +25,45 @@ impl WgPeer {
             endpoint: endpoint.to_string(),
             address: address.into(),
         }
+    }
+
+    /// Add to tunnel
+    #[tracing::instrument]
+    pub async fn add(&self, interface: &str) -> Result<()> {
+        let add_output = Command::new("wg")
+            .arg("set")
+            .arg(interface)
+            .arg("peer")
+            .arg(format!("{}", self.public_key))
+            .arg("endpoint")
+            .arg(format!("{}", self.endpoint))
+            .arg("allowed-ips")
+            .arg(format!("{}", self.address))
+            .output()
+            .await?;
+        if !add_output.status.success() {
+            let stderr = String::from_utf8_lossy(&add_output.stderr);
+            return Err(anyhow!("Failed to add peer: {stderr}"));
+        }
+        Ok(())
+    }
+
+    /// Remove from tunnel
+    #[tracing::instrument]
+    pub async fn remove(&self, interface: &str) -> Result<()> {
+        let remove_output = Command::new("wg")
+            .arg("set")
+            .arg(interface)
+            .arg("peer")
+            .arg(format!("{}", self.public_key))
+            .arg("remove")
+            .output()
+            .await?;
+        if !remove_output.status.success() {
+            let stderr = String::from_utf8_lossy(&remove_output.stderr);
+            return Err(anyhow!("Failed to remove peer: {stderr}"));
+        }
+        Ok(())
     }
 }
 

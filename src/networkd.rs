@@ -195,16 +195,12 @@ PersistentKeepalive={}",
         Ok(())
     }
 
-    /// Restart systemd-networkd
+    /// Reload systemd-networkd's configuration
     #[tracing::instrument]
-    pub async fn restart() -> Result<()> {
-        let restart_output = Command::new("systemctl")
-            .arg("restart")
-            .arg("systemd-networkd")
-            .output()
-            .await?;
-        if !restart_output.status.success() {
-            let stderr = String::from_utf8_lossy(&restart_output.stderr);
+    pub async fn reload() -> Result<()> {
+        let reload_output = Command::new("networkctl").arg("reload").output().await?;
+        if !reload_output.status.success() {
+            let stderr = String::from_utf8_lossy(&reload_output.stderr);
             let journalctl_output = Command::new("journalctl")
                 .arg("-u")
                 .arg("systemd-networkd")

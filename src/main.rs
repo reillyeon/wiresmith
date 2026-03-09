@@ -82,10 +82,11 @@ async fn main() -> Result<()> {
     }
 
     // Check whether we can find and parse an existing config.
-    let networkd_config = if let Ok(config) =
+    let networkd_config = if let Ok(mut config) =
         NetworkdConfiguration::from_config(&args.networkd_dir, &args.wg_interface).await
     {
         info!("Successfully loading existing systemd-networkd config");
+        update_configuration(&mut config, &peers, &args).await?;
         config
     } else {
         info!("No existing WireGuard configuration found on system, creating a new one");
@@ -102,11 +103,12 @@ async fn main() -> Result<()> {
             .write_config(&args.networkd_dir, args.keepalive)
             .await?;
         info!("Our new config is:\n{:#?}", networkd_config);
+
+        info!("Reloading systemd-networkd configuration");
+        NetworkdConfiguration::reload().await?;
+
         networkd_config
     };
-
-    info!("Restarting systemd-networkd");
-    NetworkdConfiguration::restart().await?;
 
     let mut interval = interval(Duration::from_secs(5));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -143,6 +145,55 @@ async fn main() -> Result<()> {
         } else {
             info!("Restarting wiresmith main loop");
         }
+    }
+
+    Ok(())
+}
+
+async fn update_configuration(
+    config: &mut NetworkdConfiguration,
+    peers: &HashSet<WgPeer>,
+    args: &CliArgs,
+) -> Result<()> {
+    // Exclude own peer config.
+    let peers_without_own_config = peers
+        .iter()
+        .filter(|&x| x.public_key != config.public_key)
+        .cloned()
+        .collect::<HashSet<WgPeer>>();
+
+    // If there is a mismatch, write a new networkd configuration.
+    let additional_peers = peers_without_own_config
+        .difference(&config.peers)
+        .collect::<Vec<_>>();
+    let deleted_peers = config
+        .peers
+        .difference(&peers_without_own_config)
+        .collect::<Vec<_>>();
+    if !additional_peers.is_empty() {
+        info!("Found {} new peer(s) in Consul", additional_peers.len());
+        debug!("New peers: {:#?}", additional_peers);
+    }
+    if !deleted_peers.is_empty() {
+        info!("Found {} deleted peer(s) in Consul", deleted_peers.len());
+        debug!("Deleted peers: {:#?}", deleted_peers);
+    }
+
+    for additional_peer in &additional_peers {
+        additional_peer.add(&args.wg_interface).await?;
+        info!("Added peer: {:#?}", additional_peer.address);
+    }
+    for deleted_peer in &deleted_peers {
+        deleted_peer.remove(&args.wg_interface).await?;
+        info!("Deleted peer: {:#?}", deleted_peer.address);
+    }
+
+    if !additional_peers.is_empty() || !deleted_peers.is_empty() {
+        config.peers = peers_without_own_config;
+        config
+            .write_config(&args.networkd_dir, args.keepalive)
+            .await
+            .context("Couldn't write new NetworkdConfiguration")?;
     }
 
     Ok(())
@@ -214,42 +265,7 @@ async fn inner_loop(
                 .await
                 .context("Couldn't load existing NetworkdConfiguration from disk")?;
 
-        // Exclude own peer config.
-        let peers_without_own_config = peers
-            .iter()
-            .filter(|&x| x.public_key != networkd_config.public_key)
-            .cloned()
-            .collect::<HashSet<WgPeer>>();
-
-        // If there is a mismatch, write a new networkd configuration.
-        let additional_peers = peers_without_own_config
-            .difference(&networkd_config.peers)
-            .collect::<Vec<_>>();
-        let deleted_peers = networkd_config
-            .peers
-            .difference(&peers_without_own_config)
-            .collect::<Vec<_>>();
-        if !additional_peers.is_empty() {
-            info!("Found {} new peer(s) in Consul", additional_peers.len());
-            debug!("New peers: {:#?}", additional_peers);
-        }
-        if !deleted_peers.is_empty() {
-            info!("Found {} deleted peer(s) in Consul", deleted_peers.len());
-            debug!("Deleted peers: {:#?}", deleted_peers);
-        }
-
-        if !additional_peers.is_empty() || !deleted_peers.is_empty() {
-            networkd_config.peers = peers_without_own_config;
-            networkd_config
-                .write_config(&args.networkd_dir, args.keepalive)
-                .await
-                .context("Couldn't write new NetworkdConfiguration")?;
-
-            info!("Restarting systemd-networkd to apply new config");
-            NetworkdConfiguration::restart()
-                .await
-                .context("Error restarting systemd-networkd")?;
-        }
+        update_configuration(&mut networkd_config, &peers, args).await?;
 
         // Wait until we've either been told to shut down or until we've slept for the update
         // period.
